@@ -498,12 +498,29 @@ def detect_adapter_id(root, timeout):
     return None
 
 
-def should_skip_pdo2(root):
+def should_skip_pdo2(root, timeout=0.0):
+    # The source PDOs can show up a little after USB goes online (piano
+    # reports the BC1.2 type first), so wait for them before giving up.
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            pdo2 = read_node(root, "pdo2").strip().lower()
+        except OSError:
+            return False
+        if not (len(pdo2) >= 8 and pdo2[:8] == "00000000"):
+            return False
+        if time.monotonic() >= deadline:
+            return True
+        time.sleep(0.1)
+
+
+def set_verify_process(root, value):
+    # piano: the charger firmware is told when an authentication runs, as
+    # the stock batterysecret does; absent on sheng.
     try:
-        pdo2 = read_node(root, "pdo2").strip().lower()
-    except OSError:
-        return False
-    return len(pdo2) >= 8 and pdo2[:8] == "00000000"
+        write_node_if_present(root, "verify_process", value)
+    except OSError as e:
+        print(f"warning: failed to set verify_process={value}: {e}", file=sys.stderr)
 
 
 def auth_already_completed(root, state):
@@ -662,11 +679,12 @@ def main():
                     "firmware may expose a stale SVID after detach",
                     file=sys.stderr)
 
-        if should_skip_pdo2(root):
+        if should_skip_pdo2(root, args.timeout):
             raise UnsupportedChargerError("pdo2 reports no source PDO for adapter authentication",
                                           terminal=True)
 
         enable_battery_auth(root)
+        set_verify_process(root, "1")
 
         send_vdm(root, 1, timeout=args.timeout, settle=ANDROID_CMD_SETTLE[1])
         send_vdm(root, 2, timeout=args.timeout, settle=ANDROID_CMD_SETTLE[2])
@@ -724,6 +742,8 @@ def main():
     else:
         if attach_token:
             write_state_file(args.state_file, attach_token)
+    finally:
+        set_verify_process(root, "0")
 
 
 if __name__ == "__main__":
