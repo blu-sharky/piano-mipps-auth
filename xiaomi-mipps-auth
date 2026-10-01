@@ -69,6 +69,7 @@ class UnsupportedChargerError(Exception):
 def find_xiaomi_dir():
     candidates = ["/sys/class/qcom-battery"]
     candidates += glob.glob("/sys/devices/platform/pmic-glink/*/xiaomi")
+    candidates += ["/sys/class/power_supply/piano-mca-usb/xiaomi"]
     for path in candidates:
         if os.path.exists(os.path.join(path, "request_vdm_cmd")):
             return path
@@ -104,7 +105,7 @@ def find_power_supply(*names):
 
 
 def usb_is_online():
-    path = find_power_supply("qcom-battmgr-usb", "usb")
+    path = find_power_supply("qcom-battmgr-usb", "usb", "piano-mca-usb")
     if not path:
         print("warning: USB power_supply node not found", file=sys.stderr)
         return False
@@ -213,7 +214,7 @@ def current_string_value(root, name):
 
 
 def current_battery_capacity():
-    battery = find_power_supply("qcom-battmgr-bat", "battery")
+    battery = find_power_supply("qcom-battmgr-bat", "battery", "bq27z561-0")
     if not battery:
         return None
     return current_int_value(battery, "capacity")
@@ -568,7 +569,9 @@ def verify_fuel_gauge(root, slave, required=True, retries=10):
 
 def enable_battery_auth(root):
     if not os.path.exists(os.path.join(root, "verify_digest")):
-        raise FileNotFoundError("verify_digest sysfs node not found")
+        # Fuel gauges outside the charger firmware (piano): nothing to verify.
+        print("battery_auth=unsupported")
+        return
 
     verify_fuel_gauge(root, False, required=True)
     verify_fuel_gauge(root, True, required=True)

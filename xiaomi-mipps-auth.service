@@ -1,6 +1,7 @@
 [Unit]
 Description=Xiaomi MiPPS/PPS charger authentication
-ConditionPathExistsGlob=/sys/devices/platform/pmic-glink/*/xiaomi/request_vdm_cmd
+ConditionPathExistsGlob=|/sys/devices/platform/pmic-glink/*/xiaomi/request_vdm_cmd
+ConditionPathExists=|/sys/class/power_supply/piano-mca-usb/xiaomi/request_vdm_cmd
 
 [Service]
 Type=oneshot
