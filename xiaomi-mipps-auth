@@ -393,8 +393,32 @@ def wait_real_type(root, timeout):
     return last
 
 
-def ensure_typec_host(timeout):
+def ensure_charger_dfp(root, timeout):
+    # piano: no Type-C class; the charger firmware swaps the data role on
+    # request ("ufp"/"dfp"), as the stock batterysecret asks it to.
+    if read_node(root, "data_role") == "dfp":
+        print("data_role=dfp")
+        return True
+    write_node(root, "data_role", "dfp")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        role = read_node(root, "data_role")
+        if role == "dfp":
+            print("data_role=dfp")
+            return True
+        time.sleep(0.05)
+    print(f"warning: timed out waiting for dfp data role, last={role}", file=sys.stderr)
+    return False
+
+
+def ensure_typec_host(timeout, root=None):
     port = find_typec_port()
+    if not port and root and os.path.exists(os.path.join(root, "data_role")):
+        try:
+            return ensure_charger_dfp(root, timeout)
+        except OSError as e:
+            print(f"warning: failed to request the dfp data role: {e}", file=sys.stderr)
+            return False
     if not port:
         print("warning: no Type-C data_role node found", file=sys.stderr)
         return False
@@ -665,8 +689,10 @@ def main():
         print(f"real_type={wait_real_type(root, args.timeout)}")
         print(f"seed_index={seed_index}")
 
+        # piano: the charger firmware only swaps roles during an authentication
+        set_verify_process(root, "1")
         if not args.no_data_role_swap:
-            ensure_typec_host(args.timeout)
+            ensure_typec_host(args.timeout, root)
 
         adapter_svid = current_adapter_svid(root)
         if adapter_svid is None:
@@ -684,7 +710,6 @@ def main():
                                           terminal=True)
 
         enable_battery_auth(root)
-        set_verify_process(root, "1")
 
         send_vdm(root, 1, timeout=args.timeout, settle=ANDROID_CMD_SETTLE[1])
         send_vdm(root, 2, timeout=args.timeout, settle=ANDROID_CMD_SETTLE[2])
