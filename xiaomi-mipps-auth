@@ -50,6 +50,10 @@ FAST_CHARGE_NOTIFICATION_TITLE = "Fast charge active"
 NOTIFICATION_STATE_FILE = "/run/xiaomi-mipps-auth/last-notification"
 CHARGE_PROFILE_STATE_FILE = "/run/xiaomi-mipps-auth/charge-profile"
 USB_ONLINE_STATE_FILE = "/run/xiaomi-mipps-auth/usb-online"
+# piano: after an authentication the source drops to 5 V and hard-resets on
+# the next PD request; the re-attach clears the UVDM state, so hold off
+LAST_AUTH_STATE_FILE = "/run/xiaomi-mipps-auth/last-auth"
+AUTH_HOLDOFF_S = 120
 SYSTEMD_UNIT = "xiaomi-mipps-auth.service"
 ANDROID_CMD_SETTLE = {
     1: 0.005,
@@ -393,8 +397,32 @@ def wait_real_type(root, timeout):
     return last
 
 
-def ensure_typec_host(timeout):
+def ensure_charger_dfp(root, timeout):
+    # piano: no Type-C class; the charger firmware swaps the data role on
+    # request ("ufp"/"dfp"), as the stock batterysecret asks it to.
+    if read_node(root, "data_role") == "dfp":
+        print("data_role=dfp")
+        return True
+    write_node(root, "data_role", "dfp")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        role = read_node(root, "data_role")
+        if role == "dfp":
+            print("data_role=dfp")
+            return True
+        time.sleep(0.05)
+    print(f"warning: timed out waiting for dfp data role, last={role}", file=sys.stderr)
+    return False
+
+
+def ensure_typec_host(timeout, root=None):
     port = find_typec_port()
+    if not port and root and os.path.exists(os.path.join(root, "data_role")):
+        try:
+            return ensure_charger_dfp(root, timeout)
+        except OSError as e:
+            print(f"warning: failed to request the dfp data role: {e}", file=sys.stderr)
+            return False
     if not port:
         print("warning: no Type-C data_role node found", file=sys.stderr)
         return False
@@ -498,12 +526,29 @@ def detect_adapter_id(root, timeout):
     return None
 
 
-def should_skip_pdo2(root):
+def should_skip_pdo2(root, timeout=0.0):
+    # The source PDOs can show up a little after USB goes online (piano
+    # reports the BC1.2 type first), so wait for them before giving up.
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            pdo2 = read_node(root, "pdo2").strip().lower()
+        except OSError:
+            return False
+        if not (len(pdo2) >= 8 and pdo2[:8] == "00000000"):
+            return False
+        if time.monotonic() >= deadline:
+            return True
+        time.sleep(0.1)
+
+
+def set_verify_process(root, value):
+    # piano: the charger firmware is told when an authentication runs, as
+    # the stock batterysecret does; absent on sheng.
     try:
-        pdo2 = read_node(root, "pdo2").strip().lower()
-    except OSError:
-        return False
-    return len(pdo2) >= 8 and pdo2[:8] == "00000000"
+        write_node_if_present(root, "verify_process", value)
+    except OSError as e:
+        print(f"warning: failed to set verify_process={value}: {e}", file=sys.stderr)
 
 
 def auth_already_completed(root, state):
@@ -642,14 +687,23 @@ def main():
         notify_completed_charge(root, NOTIFICATION_STATE_FILE)
         return
 
+    last_auth = read_state_file(LAST_AUTH_STATE_FILE)
+    if (not args.force and last_auth and last_auth.isdigit() and
+            time.monotonic() - int(last_auth) < AUTH_HOLDOFF_S):
+        print("MiPPS auth skipped: authenticated less than "
+              f"{AUTH_HOLDOFF_S} s ago (source re-attach)")
+        return
+
     try:
         seed_index = args.seed_index if args.seed_index is not None else random.randrange(len(SEEDS))
         print(f"sysfs={root}")
         print(f"real_type={wait_real_type(root, args.timeout)}")
         print(f"seed_index={seed_index}")
 
+        # piano: the charger firmware only swaps roles during an authentication
+        set_verify_process(root, "1")
         if not args.no_data_role_swap:
-            ensure_typec_host(args.timeout)
+            ensure_typec_host(args.timeout, root)
 
         adapter_svid = current_adapter_svid(root)
         if adapter_svid is None:
@@ -662,7 +716,7 @@ def main():
                     "firmware may expose a stale SVID after detach",
                     file=sys.stderr)
 
-        if should_skip_pdo2(root):
+        if should_skip_pdo2(root, args.timeout):
             raise UnsupportedChargerError("pdo2 reports no source PDO for adapter authentication",
                                           terminal=True)
 
@@ -681,6 +735,11 @@ def main():
 
         adapter_id = detect_adapter_id(root, args.timeout)
         if not adapter_id:
+            if os.path.exists(os.path.join(root, "data_role")):
+                # piano: the charger firmware only reads the adapter
+                # identity with the plug one way round
+                print("hint: re-plug the cable the other way round",
+                      file=sys.stderr)
             raise UnsupportedChargerError("adapter_id sysfs node did not report a valid adapter id",
                                           terminal=True)
 
@@ -714,6 +773,7 @@ def main():
 
         print(f"pd_auth={1 if pd_auth else 0}")
         print("MiPPS auth sequence completed")
+        write_state_file(LAST_AUTH_STATE_FILE, f"{int(time.monotonic())}")
         print_status(root)
         notify_completed_charge(root, NOTIFICATION_STATE_FILE, pd_auth)
     except UnsupportedChargerError as e:
@@ -724,6 +784,8 @@ def main():
     else:
         if attach_token:
             write_state_file(args.state_file, attach_token)
+    finally:
+        set_verify_process(root, "0")
 
 
 if __name__ == "__main__":
