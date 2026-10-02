@@ -50,6 +50,10 @@ FAST_CHARGE_NOTIFICATION_TITLE = "Fast charge active"
 NOTIFICATION_STATE_FILE = "/run/xiaomi-mipps-auth/last-notification"
 CHARGE_PROFILE_STATE_FILE = "/run/xiaomi-mipps-auth/charge-profile"
 USB_ONLINE_STATE_FILE = "/run/xiaomi-mipps-auth/usb-online"
+# piano: after an authentication the source drops to 5 V and hard-resets on
+# the next PD request; the re-attach clears the UVDM state, so hold off
+LAST_AUTH_STATE_FILE = "/run/xiaomi-mipps-auth/last-auth"
+AUTH_HOLDOFF_S = 120
 SYSTEMD_UNIT = "xiaomi-mipps-auth.service"
 ANDROID_CMD_SETTLE = {
     1: 0.005,
@@ -683,6 +687,13 @@ def main():
         notify_completed_charge(root, NOTIFICATION_STATE_FILE)
         return
 
+    last_auth = read_state_file(LAST_AUTH_STATE_FILE)
+    if (not args.force and last_auth and last_auth.isdigit() and
+            time.monotonic() - int(last_auth) < AUTH_HOLDOFF_S):
+        print("MiPPS auth skipped: authenticated less than "
+              f"{AUTH_HOLDOFF_S} s ago (source re-attach)")
+        return
+
     try:
         seed_index = args.seed_index if args.seed_index is not None else random.randrange(len(SEEDS))
         print(f"sysfs={root}")
@@ -724,6 +735,11 @@ def main():
 
         adapter_id = detect_adapter_id(root, args.timeout)
         if not adapter_id:
+            if os.path.exists(os.path.join(root, "data_role")):
+                # piano: the charger firmware only reads the adapter
+                # identity with the plug one way round
+                print("hint: re-plug the cable the other way round",
+                      file=sys.stderr)
             raise UnsupportedChargerError("adapter_id sysfs node did not report a valid adapter id",
                                           terminal=True)
 
@@ -757,6 +773,7 @@ def main():
 
         print(f"pd_auth={1 if pd_auth else 0}")
         print("MiPPS auth sequence completed")
+        write_state_file(LAST_AUTH_STATE_FILE, f"{int(time.monotonic())}")
         print_status(root)
         notify_completed_charge(root, NOTIFICATION_STATE_FILE, pd_auth)
     except UnsupportedChargerError as e:
