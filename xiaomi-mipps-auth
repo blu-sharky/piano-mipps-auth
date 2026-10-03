@@ -552,6 +552,11 @@ def set_verify_process(root, value):
 
 
 def auth_already_completed(root, state):
+    # piano: the charger firmware keeps the UVDM state and pd_verifed across
+    # attaches while the adapter starts over, so neither tells whether this
+    # attach is authenticated; the hold-off covers the adapter's own reset
+    if os.path.exists(os.path.join(root, "data_role")):
+        return False
     return state in (6, 7)
 
 
