@@ -397,6 +397,15 @@ def wait_real_type(root, timeout):
     return last
 
 
+def lost_authentication(root, timeout):
+    # piano: a Xiaomi adapter does not reset itself after the
+    # authentication; back from a replug it offers only its fixed PDOs
+    # (PD, not PD_PPS) until it is authenticated again.  A source that
+    # resets itself comes back with its own PPS APDO.
+    return (os.path.exists(os.path.join(root, "data_role")) and
+            wait_real_type(root, timeout) == "PD")
+
+
 def ensure_charger_dfp(root, timeout):
     # piano: no Type-C class; the charger firmware swaps the data role on
     # request ("ufp"/"dfp"), as the stock batterysecret asks it to.
@@ -717,7 +726,8 @@ def main():
 
     last_auth = read_state_file(LAST_AUTH_STATE_FILE)
     if (not args.force and last_auth and last_auth.isdigit() and
-            time.monotonic() - int(last_auth) < AUTH_HOLDOFF_S):
+            time.monotonic() - int(last_auth) < AUTH_HOLDOFF_S and
+            not lost_authentication(root, args.timeout)):
         print("MiPPS auth skipped: authenticated less than "
               f"{AUTH_HOLDOFF_S} s ago (source re-attach)")
         return
