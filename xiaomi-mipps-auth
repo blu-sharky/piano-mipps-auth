@@ -473,12 +473,21 @@ def wait_state(root, expected, timeout):
     raise UnsupportedChargerError(f"timed out waiting for VDM state {expected}, last={last}")
 
 
-def send_vdm(root, cmd, payload="null", timeout=2.0, wait=True, settle=0.0):
+def send_vdm(root, cmd, payload="null", timeout=2.0, wait=True, settle=0.0,
+             resend=1):
     write_node(root, "request_vdm_cmd", f"{cmd},{payload}")
     if not wait:
         time.sleep(settle)
         return vdm_state(root)
-    state = wait_state(root, cmd, timeout)
+    try:
+        state = wait_state(root, cmd, timeout)
+    except UnsupportedChargerError as e:
+        # the adapter sometimes leaves a request unanswered; Android's
+        # batterysecret sends a timed-out command once more
+        if not resend:
+            raise
+        print(f"warning: {e}; resending cmd {cmd}", file=sys.stderr)
+        return send_vdm(root, cmd, payload, timeout, wait, settle, resend - 1)
     if settle:
         time.sleep(settle)
         state = vdm_state(root)
