@@ -526,6 +526,20 @@ def detect_adapter_id(root, timeout):
     return None
 
 
+def recover_adapter_id(key, challenge, auth, limit=0x10000):
+    # piano: the charger firmware does not always report the adapter id of
+    # Xiaomi adapters (their ids seen so far fit in 16 bits).  The answer to
+    # cmd 5 is HMAC(key, challenge || id), so the id can be searched for.
+    inner = hmac.new(bytes.fromhex(key), bytes.fromhex(challenge), hashlib.sha256)
+    want = bytes.fromhex(auth[:32])
+    for i in range(limit):
+        h = inner.copy()
+        h.update(i.to_bytes(4, "big"))
+        if h.digest()[:16] == want:
+            return f"{i:08x}"
+    return None
+
+
 def should_skip_pdo2(root, timeout=0.0):
     # The source PDOs can show up a little after USB goes online (piano
     # reports the BC1.2 type first), so wait for them before giving up.
@@ -738,9 +752,14 @@ def main():
         _, auth = send_vdm(root, 5, challenge, timeout=args.timeout,
                            settle=ANDROID_CMD_SETTLE[5])
 
-        adapter_id = detect_adapter_id(root, args.timeout)
+        piano = os.path.exists(os.path.join(root, "data_role"))
+        adapter_id = detect_adapter_id(root, min(args.timeout, 1.0) if piano else args.timeout)
+        if not adapter_id and piano and auth and auth.lower() != "null":
+            adapter_id = recover_adapter_id(KEYS[seed_index], challenge, auth)
+            if adapter_id:
+                print("adapter_id recovered from the authentication answer")
         if not adapter_id:
-            if os.path.exists(os.path.join(root, "data_role")):
+            if piano:
                 # piano: the charger firmware only reads the adapter
                 # identity with the plug one way round
                 print("hint: re-plug the cable the other way round",
@@ -760,18 +779,29 @@ def main():
         print(f"adapter_id={adapter_id}")
 
         pd_auth_payload = "01000000" if pd_auth else "00000000"
-        send_vdm(root, 6, pd_auth_payload, timeout=args.timeout, wait=False,
-                 settle=0.1)
-        if pd_auth:
-            try:
-                send_vdm(root, 8, digest[32:], timeout=args.timeout)
-                print("reverse_auth=1")
-            except UnsupportedChargerError as e:
-                print(f"warning: reverse_auth=0: {e}", file=sys.stderr)
+        if piano:
+            # stock batterysecret on piano: remove compensation (7), then
+            # verified (6), no reverse authentication.  A cmd 8 that a Xiaomi
+            # adapter leaves unanswered keeps the charger firmware refusing
+            # every later PD request (retcode 512).
+            for cmd in (7, 6):
+                try:
+                    send_vdm(root, cmd, pd_auth_payload, timeout=args.timeout)
+                except UnsupportedChargerError as e:
+                    print(f"warning: cmd {cmd}: {e}", file=sys.stderr)
         else:
-            print("reverse_auth=0")
-        send_vdm(root, 7, pd_auth_payload, timeout=args.timeout, wait=False,
-                 settle=0.1)
+            send_vdm(root, 6, pd_auth_payload, timeout=args.timeout, wait=False,
+                     settle=0.1)
+            if pd_auth:
+                try:
+                    send_vdm(root, 8, digest[32:], timeout=args.timeout)
+                    print("reverse_auth=1")
+                except UnsupportedChargerError as e:
+                    print(f"warning: reverse_auth=0: {e}", file=sys.stderr)
+            else:
+                print("reverse_auth=0")
+            send_vdm(root, 7, pd_auth_payload, timeout=args.timeout, wait=False,
+                     settle=0.1)
 
         if os.path.exists(os.path.join(root, "pd_verifed")):
             write_node(root, "pd_verifed", "1" if pd_auth else "0")
