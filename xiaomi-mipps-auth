@@ -771,6 +771,16 @@ def main():
                           bytes.fromhex(challenge + adapter_id),
                           hashlib.sha256).hexdigest()
         pd_auth = auth.lower()[:32] == digest[:32]
+        if not pd_auth and piano:
+            # piano: the node keeps the id of the previous adapter
+            recovered = recover_adapter_id(KEYS[seed_index], challenge, auth)
+            if recovered:
+                print("adapter_id recovered from the authentication answer")
+                adapter_id = recovered
+                digest = hmac.new(bytes.fromhex(KEYS[seed_index]),
+                                  bytes.fromhex(challenge + adapter_id),
+                                  hashlib.sha256).hexdigest()
+                pd_auth = True
         if not pd_auth:
             print(
                 f"adapter auth mismatch: seed_index={seed_index} adapter_id={adapter_id} "
